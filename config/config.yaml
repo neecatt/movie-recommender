@@ -1,0 +1,11 @@
+project:
+  name: movie-recommender
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  models: models
+  reports: reports
+runtime:
+  mlflow_tracking_uri: http://localhost:5000
+  artifacts_path: models
+  recommend_cache_size: 1024

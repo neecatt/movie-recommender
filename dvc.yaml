@@ -1,0 +1,27 @@
+stages:
+  preprocess:
+    cmd: python scripts/preprocess.py
+    deps:
+      - scripts/preprocess.py
+      - src/data/load_data.py
+      - src/data/preprocess.py
+    outs:
+      - data/processed/movies_processed.csv
+
+  train:
+    cmd: python scripts/train.py
+    deps:
+      - data/processed/movies_processed.csv
+      - scripts/train.py
+      - src/models/hybrid.py
+      - src/features/text_features.py
+    outs:
+      - models/hybrid_artifacts.joblib
+
+  evaluate:
+    cmd: python scripts/evaluate.py
+    deps:
+      - models/hybrid_artifacts.joblib
+      - scripts/evaluate.py
+    outs:
+      - reports/results/offline_metrics.json

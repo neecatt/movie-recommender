@@ -1,0 +1,17 @@
+kagglehub
+pandas
+numpy
+scikit-learn
+matplotlib
+joblib
+fastapi
+uvicorn
+mlflow
+dvc
+pyyaml
+sentence-transformers
+rank-bm25
+faiss-cpu
+optuna
+pandera
+tqdm
