@@ -15,5 +15,8 @@ models/
 mlflow.db
 mlflow/
 mlruns/
-reports/figures/
+reports/figures/**/*.png
+reports/figures/**/*.pdf
+reports/figures/**/*.svg
 reports/results/offline_metrics.json
+reports/results/training_metrics.json

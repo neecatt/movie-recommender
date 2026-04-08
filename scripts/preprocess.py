@@ -8,7 +8,7 @@ from src.data.preprocess import preprocess_movies, save_processed
 
 
 def load_tmdb_csv(csv_path: Path, min_votes: int = 10) -> pd.DataFrame:
-    """Load the TMDB movies.csv and transform columns to the expected schema."""
+    """Load TMDB movies.csv into the canonical movie_id-based schema."""
     df = pd.read_csv(csv_path)
     print(f"Raw rows loaded: {len(df)}")
 
@@ -34,7 +34,7 @@ def load_tmdb_csv(csv_path: Path, min_votes: int = 10) -> pd.DataFrame:
 
     credits = df["credits"].fillna("")
     mapped["star"] = credits.apply(
-        lambda c: ", ".join(str(c).split("-")[:4]) if c else ""
+        lambda c: ", ".join(str(c).split("-")[:6]) if c else ""
     )
     mapped["director"] = ""
 

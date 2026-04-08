@@ -2,30 +2,29 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.models.reranker import build_features
+from src.models.reranker import FEATURE_NAMES, build_features
 
 
-def test_build_features_ignores_empty_director_matches():
-    base = pd.Series(
-        {
-            "genre": "Action",
-            "director_primary": "",
-            "star_primary": "Star A",
-        }
-    )
+def test_build_features_sets_bridge_only_when_candidate_matches_both():
+    base_rows = [
+        pd.Series({"genre": "Action", "keywords": "hero", "star": "Star A", "runtime_min": 110, "year": 2020}),
+        pd.Series({"genre": "Comedy", "keywords": "funny", "star": "Star B", "runtime_min": 100, "year": 2022}),
+    ]
     cand = pd.Series(
         {
-            "genre": "Action",
-            "director_primary": "",
-            "star_primary": "Star A",
+            "genre": "Action, Comedy",
+            "keywords": "hero, funny",
+            "star": "Star A, Star B",
             "bayesian_rating": 7.5,
             "recency_score": 0.9,
             "votes": 1000,
+            "runtime_min": 108,
+            "year": 2021,
         }
     )
 
     features = build_features(
-        [base],
+        base_rows,
         cand,
         {
             "sim_a": 0.8,
@@ -34,12 +33,8 @@ def test_build_features_ignores_empty_director_matches():
             "sim_mean": 0.75,
             "sim_gap": 0.1,
             "joint_score": 0.72,
-            "embed_a": 0.0,
-            "embed_b": 0.0,
-            "embed_min": 0.0,
-            "bm25_a": 0.0,
-            "bm25_b": 0.0,
         },
     )
 
-    assert features[12] == 0
+    assert len(features) == len(FEATURE_NAMES)
+    assert features[7] == 1.0

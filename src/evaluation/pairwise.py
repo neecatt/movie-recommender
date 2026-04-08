@@ -12,6 +12,10 @@ def parse_tmdb_recommendations(value: object) -> set[str]:
     return {part.strip() for part in str(value).split("-") if part.strip()}
 
 
+def split_genres(value: object) -> set[str]:
+    return {part.strip() for part in str(value).split(",") if part.strip()}
+
+
 def build_tmdb_recommendation_sets(df: pd.DataFrame) -> tuple[list[set[str]], dict[str, int]]:
     if "movie_id" not in df.columns:
         raise ValueError("Expected a movie_id column for TMDB recommendation lookup.")
@@ -30,80 +34,74 @@ def build_tmdb_recommendation_sets(df: pd.DataFrame) -> tuple[list[set[str]], di
     return recommendation_sets, id_to_index
 
 
+def classify_pair(df: pd.DataFrame, idx_a: int, idx_b: int) -> str:
+    genres_a = split_genres(df.iloc[idx_a].get("genre", ""))
+    genres_b = split_genres(df.iloc[idx_b].get("genre", ""))
+    primary_a = str(df.iloc[idx_a].get("genre", "")).split(",")[0].strip()
+    primary_b = str(df.iloc[idx_b].get("genre", "")).split(",")[0].strip()
+    overlap = genres_a & genres_b
+    if primary_a and primary_a == primary_b:
+        return "similar_taste"
+    if overlap:
+        return "mixed_taste"
+    return "far_apart"
+
+
 def build_pair_queries(
     df: pd.DataFrame,
     sample_size: int,
     random_state: int = 42,
-    candidate_pool_size: int = 40,
+    candidate_pool_size: int = 30,
     min_shared_recommendations: int = 1,
 ) -> list[tuple[int, int]]:
     recommendation_sets, _ = build_tmdb_recommendation_sets(df)
-    primary_genres = (
-        df.get("genre", "")
-        .fillna("")
-        .astype(str)
-        .str.split(",")
-        .str[0]
-        .str.strip()
-        .tolist()
-    )
-
-    by_genre: dict[str, list[int]] = defaultdict(list)
-    eligible = []
-    for idx, recs in enumerate(recommendation_sets):
-        if recs:
-            genre = primary_genres[idx]
-            if genre:
-                by_genre[genre].append(idx)
-                eligible.append(idx)
-
+    eligible = [idx for idx, recs in enumerate(recommendation_sets) if recs]
     if not eligible:
         return []
 
     rng = np.random.default_rng(random_state)
-    rng.shuffle(eligible)
-    pairs: list[tuple[int, int]] = []
+    pairs_by_slice: dict[str, list[tuple[int, int, tuple[int, int]]]] = defaultdict(list)
     seen: set[tuple[int, int]] = set()
 
     for idx_a in eligible:
-        genre = primary_genres[idx_a]
-        bucket = [idx for idx in by_genre.get(genre, []) if idx != idx_a]
-        if not bucket:
-            continue
-
-        if len(bucket) > candidate_pool_size:
-            candidate_indices = rng.choice(bucket, size=candidate_pool_size, replace=False).tolist()
+        pool = [idx for idx in eligible if idx != idx_a]
+        if len(pool) > candidate_pool_size:
+            candidate_indices = rng.choice(pool, size=candidate_pool_size, replace=False).tolist()
         else:
-            candidate_indices = bucket
+            candidate_indices = pool
 
-        best_idx: int | None = None
-        best_score = (-1, -1.0)
         recs_a = recommendation_sets[idx_a]
-        genres_a = {g.strip() for g in str(df.iloc[idx_a].get("genre", "")).split(",") if g.strip()}
-
+        genres_a = split_genres(df.iloc[idx_a].get("genre", ""))
         for idx_b in candidate_indices:
+            pair = tuple(sorted((idx_a, idx_b)))
+            if pair in seen:
+                continue
             recs_b = recommendation_sets[idx_b]
             shared_recs = len(recs_a & recs_b)
             if shared_recs < min_shared_recommendations:
                 continue
-            genres_b = {g.strip() for g in str(df.iloc[idx_b].get("genre", "")).split(",") if g.strip()}
-            score = (shared_recs, float(len(genres_a & genres_b)))
-            if score > best_score:
-                best_score = score
-                best_idx = idx_b
+            genres_b = split_genres(df.iloc[idx_b].get("genre", ""))
+            overlap = len(genres_a & genres_b)
+            pair_type = classify_pair(df, idx_a, idx_b)
+            score = (shared_recs, overlap)
+            pairs_by_slice[pair_type].append((idx_a, idx_b, score))
+            seen.add(pair)
 
-        if best_idx is None:
-            continue
+    ordered_pairs: list[tuple[int, int]] = []
+    per_slice_quota = max(sample_size // 3, 1)
+    for slice_name in ("similar_taste", "mixed_taste", "far_apart"):
+        ranked = sorted(pairs_by_slice.get(slice_name, []), key=lambda item: item[2], reverse=True)
+        ordered_pairs.extend((idx_a, idx_b) for idx_a, idx_b, _ in ranked[:per_slice_quota])
 
-        pair = tuple(sorted((idx_a, best_idx)))
-        if pair in seen:
-            continue
-        seen.add(pair)
-        pairs.append(pair)
-        if len(pairs) >= sample_size:
-            break
+    if len(ordered_pairs) < sample_size:
+        leftovers: list[tuple[int, int, tuple[int, int]]] = []
+        for slice_name in ("similar_taste", "mixed_taste", "far_apart"):
+            ranked = sorted(pairs_by_slice.get(slice_name, []), key=lambda item: item[2], reverse=True)
+            leftovers.extend(ranked[per_slice_quota:])
+        leftovers = sorted(leftovers, key=lambda item: item[2], reverse=True)
+        ordered_pairs.extend((idx_a, idx_b) for idx_a, idx_b, _ in leftovers[: sample_size - len(ordered_pairs)])
 
-    return pairs
+    return ordered_pairs[:sample_size]
 
 
 def build_pair_relevance_gains(
@@ -118,35 +116,44 @@ def build_pair_relevance_gains(
     if not recs_a or not recs_b:
         return {}
 
-    seed_genres = []
-    for idx in (idx_a, idx_b):
-        seed_genres.append(
-            {g.strip() for g in str(df.iloc[idx].get("genre", "")).split(",") if g.strip()}
-        )
+    seed_rows = [df.iloc[idx_a], df.iloc[idx_b]]
+    seed_genres = [split_genres(row.get("genre", "")) for row in seed_rows]
+    seed_rating_mean = float(np.mean([float(row.get("rating", 0) or 0) for row in seed_rows]))
+    seed_year_mean = float(np.mean([float(row.get("year", 0) or 0) for row in seed_rows if float(row.get("year", 0) or 0) > 0] or [0]))
 
     gains: dict[str, float] = {}
     for rec_id in recs_a | recs_b:
         idx = id_to_index.get(rec_id)
         if idx is None:
             continue
-        movie_name = str(df.iloc[idx].get("movie_name", "")).strip()
-        if not movie_name:
+
+        row = df.iloc[idx]
+        movie_id = str(row.get("movie_id", "")).strip()
+        if not movie_id:
             continue
 
-        candidate_genres = {
-            g.strip() for g in str(df.iloc[idx].get("genre", "")).split(",") if g.strip()
-        }
+        candidate_genres = split_genres(row.get("genre", ""))
         shared_with_a = bool(candidate_genres & seed_genres[0])
         shared_with_b = bool(candidate_genres & seed_genres[1])
+        rating = float(row.get("rating", 0) or 0)
+        year = float(row.get("year", 0) or 0)
 
-        gain = 1.0
+        gain = 0.0
         if rec_id in recs_a and rec_id in recs_b:
-            gain += 2.0
-        if shared_with_a and shared_with_b:
-            gain += 0.5
-        elif shared_with_a or shared_with_b:
-            gain += 0.25
+            gain += 2.5
+        elif rec_id in recs_a or rec_id in recs_b:
+            gain += 0.8
 
-        gains[movie_name] = max(gain, gains.get(movie_name, 0.0))
+        if shared_with_a and shared_with_b:
+            gain += 1.0
+        elif shared_with_a or shared_with_b:
+            gain += 0.2
+
+        if rating >= max(seed_rating_mean - 1.0, 6.0):
+            gain += 0.3
+        if year > 0 and seed_year_mean > 0:
+            gain += max(0.0, 0.2 - min(abs(seed_year_mean - year) / 100.0, 0.2))
+
+        gains[movie_id] = max(gain, gains.get(movie_id, 0.0))
 
     return gains

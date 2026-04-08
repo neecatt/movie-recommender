@@ -17,6 +17,7 @@ stages:
       - src/features/text_features.py
     outs:
       - models/hybrid_artifacts.joblib
+      - reports/results/training_metrics.json
 
   evaluate:
     cmd: python scripts/evaluate.py
@@ -25,3 +26,13 @@ stages:
       - scripts/evaluate.py
     outs:
       - reports/results/offline_metrics.json
+
+  plot_metrics:
+    cmd: python scripts/plot_metrics.py
+    deps:
+      - scripts/plot_metrics.py
+      - reports/results/training_metrics.json
+      - reports/results/offline_metrics.json
+    outs:
+      - reports/figures/training
+      - reports/figures/eval

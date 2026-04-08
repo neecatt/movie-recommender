@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from pathlib import Path
+import inspect
+import json
+import os
 import time
+from pathlib import Path
 
 import joblib
 import mlflow
 import pandas as pd
-import os
 
 from src.models.hybrid import HybridRecommender
-from src.models.reranker import train_reranker
+from src.models.reranker import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, train_reranker
+
+
+def _func_defaults(func) -> dict:
+    sig = inspect.signature(func)
+    return {
+        name: p.default
+        for name, p in sig.parameters.items()
+        if p.default is not inspect.Parameter.empty
+    }
 
 
 def main() -> None:
@@ -24,9 +35,7 @@ def main() -> None:
     print("Loading processed data...")
     df = pd.read_csv(processed_path)
     print(f"Rows loaded: {len(df)}")
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI")
-    )
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     mlflow.set_experiment("movie_recommender")
 
     embedding_cache = models_dir / "embeddings_all-mpnet-base-v2.npy"
@@ -52,17 +61,56 @@ def main() -> None:
                 "bm25_weight": model.bm25_weight,
                 "genre_weight": model.genre_weight,
                 "min_votes": model.min_votes,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "reranker_feature_count": len(FEATURE_NAMES),
             }
         )
         print("Fitting hybrid model (this can take a few minutes)...")
-        start = time.time()
+        fit_start = time.time()
         model.fit(df)
-        print(f"Model fit completed in {time.time() - start:.1f}s")
+        fit_duration = time.time() - fit_start
+        print(f"Model fit completed in {fit_duration:.1f}s")
 
         print("Training reranker...")
+        rr_defaults = _func_defaults(train_reranker)
+        rr_start = time.time()
         reranker = train_reranker(df, model)
+        reranker_duration = time.time() - rr_start
         model.set_reranker(reranker)
         print("Reranker trained.")
+
+        reports_dir = project_root / "reports" / "results"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        training_metrics = {
+            "fit_duration_sec": round(fit_duration, 3),
+            "reranker_fit_duration_sec": round(reranker_duration, 3),
+            "training_rows": len(df),
+            "content_weight": model.content_weight,
+            "embedding_weight": model.embedding_weight,
+            "popularity_weight": model.popularity_weight,
+            "bm25_weight": model.bm25_weight,
+            "genre_weight": model.genre_weight,
+            "min_votes": model.min_votes,
+            "embedding_model": model.embedding_model,
+            "use_embeddings": model.use_embeddings,
+            "use_bm25": model.use_bm25,
+            "use_faiss": model.use_faiss,
+            "faiss_top_k": model.faiss_top_k,
+            "reranker_sample_size": rr_defaults.get("sample_size"),
+            "reranker_top_k": rr_defaults.get("top_k"),
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "reranker_feature_count": len(FEATURE_NAMES),
+        }
+        (reports_dir / "training_metrics.json").write_text(
+            json.dumps(training_metrics, indent=2)
+        )
+        mlflow.log_metrics(
+            {
+                "train_fit_duration_sec": fit_duration,
+                "train_reranker_duration_sec": reranker_duration,
+                "train_rows": len(df),
+            }
+        )
 
         artifacts = model.export_artifacts()
         artifacts["training_rows"] = len(df)

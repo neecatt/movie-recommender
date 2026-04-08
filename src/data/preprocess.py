@@ -5,6 +5,11 @@ import pandera.pandas as pa
 from pandera import Column, DataFrameSchema
 
 
+def _nonempty_ratio(series: pd.Series) -> float:
+    normalized = series.fillna("").astype(str).str.strip()
+    return float((normalized != "").mean())
+
+
 def _normalize_strings(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     for col in columns:
         if col in df.columns:
@@ -35,6 +40,7 @@ def preprocess_movies(df: pd.DataFrame) -> pd.DataFrame:
     string_cols = [
         "movie_name", "certificate", "genre", "description",
         "director", "director_id", "star", "star_id", "keywords",
+        "original_language", "tmdb_recommendations",
     ]
     df = _normalize_strings(df, [c for c in string_cols if c in df.columns])
 
@@ -94,6 +100,25 @@ def preprocess_movies(df: pd.DataFrame) -> pd.DataFrame:
     if "gross" in df.columns and "year" in df.columns:
         df["gross"] = df.groupby("year")["gross"].transform(lambda s: s.fillna(s.median()))
         df["gross"] = df["gross"].fillna(0)
+
+    required_signal_cols = {
+        "movie_id": 0.99,
+        "movie_name": 0.99,
+        "genre": 0.75,
+        "description": 0.55,
+        "keywords": 0.20,
+        "star": 0.50,
+    }
+    for col, min_ratio in required_signal_cols.items():
+        if col in df.columns:
+            ratio = _nonempty_ratio(df[col])
+            if ratio < min_ratio:
+                raise ValueError(
+                    f"Column {col} is too sparse for ranking: coverage={ratio:.3f}, required={min_ratio:.3f}"
+                )
+
+    if "movie_id" in df.columns and df["movie_id"].duplicated().any():
+        raise ValueError("movie_id must remain unique after preprocessing.")
 
     return df
 
