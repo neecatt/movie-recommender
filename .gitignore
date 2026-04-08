@@ -11,7 +11,6 @@ __pycache__/
 data/raw/
 data/external/
 data/processed/
-models/
 mlflow.db
 mlflow/
 mlruns/
