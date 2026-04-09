@@ -140,14 +140,14 @@ def build_pair_relevance_gains(
 
         gain = 0.0
         if rec_id in recs_a and rec_id in recs_b:
-            gain += 2.5
+            gain += 2.2
         elif rec_id in recs_a or rec_id in recs_b:
-            gain += 0.8
+            gain += 0.45
 
         if shared_with_a and shared_with_b:
-            gain += 1.0
+            gain += 1.4
         elif shared_with_a or shared_with_b:
-            gain += 0.2
+            gain += 0.05
 
         if rating >= max(seed_rating_mean - 1.0, 6.0):
             gain += 0.3

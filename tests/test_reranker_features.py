@@ -38,3 +38,4 @@ def test_build_features_sets_bridge_only_when_candidate_matches_both():
 
     assert len(features) == len(FEATURE_NAMES)
     assert features[7] == 1.0
+    assert features[8] >= 1.0

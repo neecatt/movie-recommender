@@ -82,6 +82,17 @@ def test_pair_recommendation_prefers_shared_movie():
     assert {rec.movie_id for rec in recs}.isdisjoint({"a1", "b1"})
 
 
+def test_far_apart_pair_prefers_bridge_movie_over_one_sided_clones():
+    model = _fit_model()
+    score_bundle = model.pair_score_bundle(0, 1)
+    bridge_score = float(score_bundle["pair_scores"][2])
+    action_clone_score = float(score_bundle["pair_scores"][3])
+    comedy_clone_score = float(score_bundle["pair_scores"][4])
+
+    assert bridge_score > action_clone_score
+    assert bridge_score > comedy_clone_score
+
+
 def test_ambiguous_title_requires_movie_id():
     model = _fit_model()
     with pytest.raises(ValueError, match="Ambiguous title"):

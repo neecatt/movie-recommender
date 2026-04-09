@@ -399,13 +399,33 @@ class HybridRecommender:
     ) -> float:
         bonus = 0.0
         cand_genres = self._split_items(cand_row.get("genre", ""))
+        per_seed_overlap: list[int] = []
         for base_row in base_rows:
             base_genres = self._split_items(base_row.get("genre", ""))
             overlap = cand_genres & base_genres
+            per_seed_overlap.append(len(overlap))
             bonus += 0.12 * len(overlap)
             if self._genre_co_map and cand_genres and base_genres:
                 bonus += 0.005 * cooccurrence_similarity(base_genres, cand_genres, self._genre_co_map)
+        if per_seed_overlap:
+            if min(per_seed_overlap) > 0:
+                bonus += 0.18 + 0.05 * min(per_seed_overlap)
+            else:
+                bonus -= 0.08 * (max(per_seed_overlap) - min(per_seed_overlap))
         return bonus + 0.2 * self._quality_bonus(cand_row)
+
+    def _pair_bridge_scores(self, idx_a: int, idx_b: int) -> np.ndarray:
+        if self._genre_matrix is None or self._df is None:
+            return np.zeros(len(self._df) if self._df is not None else 0, dtype=np.float32)
+        overlap_a = np.minimum(self._genre_matrix, self._genre_matrix[idx_a]).sum(axis=1)
+        overlap_b = np.minimum(self._genre_matrix, self._genre_matrix[idx_b]).sum(axis=1)
+        bridge_binary = ((overlap_a > 0) & (overlap_b > 0)).astype(np.float32)
+        bridge_depth = np.minimum(overlap_a, overlap_b).astype(np.float32)
+        if bridge_depth.max() > bridge_depth.min():
+            bridge_depth = (bridge_depth - bridge_depth.min()) / (bridge_depth.max() - bridge_depth.min() + 1e-9)
+        else:
+            bridge_depth = np.zeros_like(bridge_depth)
+        return 0.65 * bridge_binary + 0.35 * bridge_depth
 
     def _combined_scores(self, idx_list: list[int]) -> np.ndarray:
         if self._df is None or self._tfidf_matrix is None:
@@ -488,16 +508,19 @@ class HybridRecommender:
         sim_a = self._combined_scores([idx_a])
         sim_b = self._combined_scores([idx_b])
         joint = self._combined_scores([idx_a, idx_b])
+        bridge = self._pair_bridge_scores(idx_a, idx_b)
         pair_scores = (
-            0.65 * np.minimum(sim_a, sim_b)
-            + 0.25 * joint
-            + 0.10 * ((sim_a + sim_b) / 2.0)
-            - 0.20 * np.abs(sim_a - sim_b)
+            0.35 * np.minimum(sim_a, sim_b)
+            + 0.20 * joint
+            + 0.15 * ((sim_a + sim_b) / 2.0)
+            + 0.30 * bridge
+            - 0.10 * np.abs(sim_a - sim_b)
         )
         return {
             "sim_a": sim_a,
             "sim_b": sim_b,
             "joint": joint,
+            "bridge": bridge,
             "pair_scores": pair_scores,
         }
 
@@ -523,7 +546,7 @@ class HybridRecommender:
 
         candidate_pool: set[int] = set()
         per_seed_pool = max(top_pool, 120)
-        for scores in (sim_a, sim_b, joint, pair_scores):
+        for scores in (sim_a, sim_b, joint, bundle["bridge"], pair_scores):
             ranked = scores.argsort()[::-1]
             count = 0
             for idx in ranked:
@@ -632,6 +655,8 @@ class HybridRecommender:
         cand_genres = self._split_items(cand_row.get("genre", ""))
         if cand_genres & genres_a and cand_genres & genres_b:
             works_for_both.append("Bridges both picks through overlapping genres.")
+        elif cand_genres and (cand_genres & genres_a or cand_genres & genres_b):
+            works_for_both.append("Acts as a compromise by borrowing elements from each side.")
         if pair_stats["sim_min"] >= 0.45:
             works_for_both.append("Stays reasonably close to both people’s tastes.")
         if pair_stats["sim_gap"] <= 0.12:

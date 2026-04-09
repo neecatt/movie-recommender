@@ -13,7 +13,7 @@ from src.evaluation.pairwise import (
     build_tmdb_recommendation_sets,
 )
 
-FEATURE_SCHEMA_VERSION = "couple_reranker_v1"
+FEATURE_SCHEMA_VERSION = "couple_reranker_v2"
 FEATURE_NAMES = (
     "sim_a",
     "sim_b",
@@ -23,11 +23,13 @@ FEATURE_NAMES = (
     "joint_score",
     "genre_overlap_total",
     "genre_bridge",
+    "genre_bridge_depth",
     "keyword_overlap_total",
     "cast_overlap_total",
     "runtime_balance",
     "quality_prior",
     "recency_balance",
+    "one_sided_penalty",
 )
 
 
@@ -90,9 +92,15 @@ def build_features(
         per_seed_genre_overlap.append(genre_overlap)
 
     genre_bridge = float(all(overlap > 0 for overlap in per_seed_genre_overlap)) if per_seed_genre_overlap else 0.0
+    genre_bridge_depth = float(min(per_seed_genre_overlap)) if per_seed_genre_overlap else 0.0
     runtime_balance = _runtime_balance(base_rows, cand_row)
     quality_prior = _quality_prior(cand_row)
     recency_balance = _recency_balance(base_rows, cand_row)
+    one_sided_penalty = float(
+        abs(pair_stats["sim_a"] - pair_stats["sim_b"])
+        + max(per_seed_genre_overlap, default=0)
+        - min(per_seed_genre_overlap, default=0)
+    )
 
     return [
         pair_stats["sim_a"],
@@ -103,11 +111,13 @@ def build_features(
         pair_stats["joint_score"],
         float(genre_overlap_total),
         genre_bridge,
+        genre_bridge_depth,
         float(keyword_overlap_total),
         float(cast_overlap_total),
         runtime_balance,
         quality_prior,
         recency_balance,
+        one_sided_penalty,
     ]
 
 
@@ -149,6 +159,15 @@ def train_reranker(
             )
             features = build_features([base_a, base_b], cand, pair_stats)
             relevance = gains.get(str(cand.get("movie_id", "")).strip(), 0.0)
+            if relevance <= 0:
+                bridge_depth = features[8]
+                one_sided_penalty = features[-1]
+                if pair_stats["sim_min"] >= 0.18 and bridge_depth > 0:
+                    relevance = 0.08 + 0.04 * pair_stats["sim_min"] + 0.03 * bridge_depth
+                elif pair_stats["sim_gap"] >= 0.28 or one_sided_penalty >= 1.5:
+                    relevance = -0.12 - 0.05 * min(pair_stats["sim_gap"], 1.0)
+                else:
+                    relevance = 0.01 * pair_stats["sim_mean"]
             X.append(features)
             y.append(relevance)
 
