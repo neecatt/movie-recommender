@@ -100,7 +100,11 @@ class HybridRecommender:
         self.genre_weight /= total
 
     def fit(self, df: pd.DataFrame) -> None:
-        self._df = df.reset_index(drop=True)
+        self._df = df.reset_index(drop=True).copy()
+        if "movie_id" in self._df.columns:
+            self._df["movie_id"] = self._df["movie_id"].astype(str)
+        if "movie_name" in self._df.columns:
+            self._df["movie_name"] = self._df["movie_name"].astype(str)
         (
             self._vectorizer,
             self._tfidf_matrix,
@@ -224,7 +228,11 @@ class HybridRecommender:
             use_faiss=bool(artifacts.get("use_faiss", True)),
             faiss_top_k=int(artifacts.get("faiss_top_k", 3000)),
         )
-        model._df = artifacts["df"]
+        model._df = artifacts["df"].copy()
+        if "movie_id" in model._df.columns:
+            model._df["movie_id"] = model._df["movie_id"].astype(str)
+        if "movie_name" in model._df.columns:
+            model._df["movie_name"] = model._df["movie_name"].astype(str)
         model._vectorizer = artifacts["vectorizer"]
         model._tfidf_matrix = artifacts["tfidf_matrix"]
         model._embedding_matrix = artifacts.get("embedding_matrix")
@@ -316,6 +324,7 @@ class HybridRecommender:
     def _resolve_reference(self, movie_ref: str) -> int:
         if self._df is None or self._id_to_index is None or self._title_to_indices is None:
             raise RuntimeError("Call fit() before recommend().")
+        movie_ref = str(movie_ref)
         if movie_ref in self._id_to_index:
             return int(self._id_to_index[movie_ref])
         if movie_ref in self._title_to_indices:
