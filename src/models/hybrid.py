@@ -50,6 +50,7 @@ class HybridRecommender:
         use_embeddings: bool = True,
         embedding_model: str = "all-mpnet-base-v2",
         embedding_cache_path: str | None = None,
+        embedding_device: str | None = None,
         use_bm25: bool = True,
         use_faiss: bool = True,
         faiss_top_k: int = 3000,
@@ -63,6 +64,7 @@ class HybridRecommender:
         self.use_embeddings = use_embeddings
         self.embedding_model = embedding_model
         self.embedding_cache_path = embedding_cache_path
+        self.embedding_device = embedding_device
         self.use_bm25 = use_bm25
         self.use_faiss = use_faiss
         self.faiss_top_k = faiss_top_k
@@ -109,6 +111,7 @@ class HybridRecommender:
             use_embeddings=self.use_embeddings,
             embedding_model=self.embedding_model,
             cache_path=Path(self.embedding_cache_path) if self.embedding_cache_path else None,
+            embedding_device=self.embedding_device,
         )
         if self.use_bm25 and self._tokenized:
             from rank_bm25 import BM25Okapi
@@ -195,6 +198,7 @@ class HybridRecommender:
             "use_embeddings": self.use_embeddings,
             "embedding_model": self.embedding_model,
             "embedding_cache_path": self.embedding_cache_path,
+            "embedding_device": self.embedding_device,
             "use_bm25": self.use_bm25,
             "reranker": self._reranker,
             "use_faiss": self.use_faiss,
@@ -215,6 +219,7 @@ class HybridRecommender:
             use_embeddings=bool(artifacts.get("use_embeddings", True)),
             embedding_model=str(artifacts.get("embedding_model", "all-mpnet-base-v2")),
             embedding_cache_path=artifacts.get("embedding_cache_path"),
+            embedding_device=artifacts.get("embedding_device"),
             use_bm25=bool(artifacts.get("use_bm25", False)),
             use_faiss=bool(artifacts.get("use_faiss", True)),
             faiss_top_k=int(artifacts.get("faiss_top_k", 3000)),

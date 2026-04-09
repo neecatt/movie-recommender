@@ -7,11 +7,26 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 
+def _resolve_embedding_device(preferred_device: str | None = None) -> str:
+    if preferred_device:
+        return preferred_device
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def build_text_features(
     df: pd.DataFrame,
     use_embeddings: bool = False,
     embedding_model: str = "all-mpnet-base-v2",
     cache_path: Path | None = None,
+    embedding_device: str | None = None,
 ) -> tuple[TfidfVectorizer, object, object | None, list[list[str]]]:
     """Build TF-IDF features and optional sentence embeddings."""
     working = df.copy()
@@ -55,7 +70,7 @@ def build_text_features(
                 from sentence_transformers import SentenceTransformer
             except ImportError as exc:
                 raise ImportError("sentence-transformers is required for embeddings") from exc
-            device = "mps"
+            device = _resolve_embedding_device(embedding_device)
             model = SentenceTransformer(embedding_model, device=device)
             embedding_matrix = model.encode(embed_text.tolist(), show_progress_bar=True)
             if cache_path:
