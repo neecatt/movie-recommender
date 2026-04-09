@@ -129,10 +129,24 @@ def train_reranker(
         if not gains:
             continue
 
-        pair_scores, candidates = model.two_seed_candidate_scores(idx_a, idx_b, top_pool=top_k)
+        score_bundle = model.pair_score_bundle(idx_a, idx_b)
+        pair_scores, candidates = model.two_seed_candidate_scores(
+            idx_a,
+            idx_b,
+            top_pool=top_k,
+            score_bundle=score_bundle,
+        )
         for i in candidates:
             cand = df.loc[i]
-            pair_stats = model.pair_feature_stats(idx_a, idx_b, i, pair_scores=pair_scores)
+            pair_stats = model.pair_feature_stats(
+                idx_a,
+                idx_b,
+                i,
+                pair_scores=pair_scores,
+                sim_a_scores=score_bundle["sim_a"],
+                sim_b_scores=score_bundle["sim_b"],
+                joint_scores=score_bundle["joint"],
+            )
             features = build_features([base_a, base_b], cand, pair_stats)
             relevance = gains.get(str(cand.get("movie_id", "")).strip(), 0.0)
             X.append(features)

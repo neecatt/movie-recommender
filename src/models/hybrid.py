@@ -446,10 +446,20 @@ class HybridRecommender:
         idx_b: int,
         cand_idx: int,
         pair_scores: np.ndarray | None = None,
+        sim_a_scores: np.ndarray | None = None,
+        sim_b_scores: np.ndarray | None = None,
+        joint_scores: np.ndarray | None = None,
     ) -> dict[str, float]:
-        sim_a = float(self._combined_scores([idx_a])[cand_idx])
-        sim_b = float(self._combined_scores([idx_b])[cand_idx])
-        joint_score = float(self._combined_scores([idx_a, idx_b])[cand_idx])
+        if sim_a_scores is None:
+            sim_a_scores = self._combined_scores([idx_a])
+        if sim_b_scores is None:
+            sim_b_scores = self._combined_scores([idx_b])
+        if joint_scores is None:
+            joint_scores = self._combined_scores([idx_a, idx_b])
+
+        sim_a = float(sim_a_scores[cand_idx])
+        sim_b = float(sim_b_scores[cand_idx])
+        joint_score = float(joint_scores[cand_idx])
         pair_score = (
             float(pair_scores[cand_idx])
             if pair_scores is not None
@@ -465,15 +475,7 @@ class HybridRecommender:
             "pair_score": pair_score,
         }
 
-    def two_seed_candidate_scores(
-        self,
-        idx_a: int,
-        idx_b: int,
-        top_pool: int = 300,
-    ) -> tuple[np.ndarray, list[int]]:
-        if self._df is None:
-            raise RuntimeError("Call fit() before recommend().")
-
+    def pair_score_bundle(self, idx_a: int, idx_b: int) -> dict[str, np.ndarray]:
         sim_a = self._combined_scores([idx_a])
         sim_b = self._combined_scores([idx_b])
         joint = self._combined_scores([idx_a, idx_b])
@@ -483,6 +485,28 @@ class HybridRecommender:
             + 0.10 * ((sim_a + sim_b) / 2.0)
             - 0.20 * np.abs(sim_a - sim_b)
         )
+        return {
+            "sim_a": sim_a,
+            "sim_b": sim_b,
+            "joint": joint,
+            "pair_scores": pair_scores,
+        }
+
+    def two_seed_candidate_scores(
+        self,
+        idx_a: int,
+        idx_b: int,
+        top_pool: int = 300,
+        score_bundle: dict[str, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, list[int]]:
+        if self._df is None:
+            raise RuntimeError("Call fit() before recommend().")
+
+        bundle = score_bundle or self.pair_score_bundle(idx_a, idx_b)
+        sim_a = bundle["sim_a"]
+        sim_b = bundle["sim_b"]
+        joint = bundle["joint"]
+        pair_scores = bundle["pair_scores"]
 
         mask = self._candidate_mask()
         base_exclusions = {idx_a, idx_b}
@@ -624,7 +648,13 @@ class HybridRecommender:
         if idx_a == idx_b:
             raise ValueError("Choose two different movies.")
 
-        pair_scores, candidates = self.two_seed_candidate_scores(idx_a, idx_b, top_pool=max(top_n * 20, 180))
+        score_bundle = self.pair_score_bundle(idx_a, idx_b)
+        pair_scores, candidates = self.two_seed_candidate_scores(
+            idx_a,
+            idx_b,
+            top_pool=max(top_n * 20, 180),
+            score_bundle=score_bundle,
+        )
         candidates = candidates[: max(top_n * 10, 80)]
 
         base_a = self._df.iloc[idx_a]
@@ -632,7 +662,15 @@ class HybridRecommender:
         reranked: list[tuple[int, float, dict[str, float]]] = []
         for i in candidates:
             row = self._df.iloc[i]
-            pair_stats = self.pair_feature_stats(idx_a, idx_b, i, pair_scores=pair_scores)
+            pair_stats = self.pair_feature_stats(
+                idx_a,
+                idx_b,
+                i,
+                pair_scores=pair_scores,
+                sim_a_scores=score_bundle["sim_a"],
+                sim_b_scores=score_bundle["sim_b"],
+                joint_scores=score_bundle["joint"],
+            )
             rule_score = self._paired_overlap_bonus([base_a, base_b], row)
             final_score = float(pair_stats["pair_score"]) + rule_score
             if self._reranker is not None:
