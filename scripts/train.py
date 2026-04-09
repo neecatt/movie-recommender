@@ -23,6 +23,15 @@ def _func_defaults(func) -> dict:
     }
 
 
+def _resolve_mlflow_tracking_uri(project_root: Path) -> str:
+    configured = os.getenv("MLFLOW_TRACKING_URI")
+    if configured:
+        return configured
+    local_tracking_dir = project_root / "mlruns"
+    local_tracking_dir.mkdir(parents=True, exist_ok=True)
+    return local_tracking_dir.resolve().as_uri()
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     processed_path = project_root / "data" / "processed" / "movies_processed.csv"
@@ -35,7 +44,9 @@ def main() -> None:
     print("Loading processed data...")
     df = pd.read_csv(processed_path)
     print(f"Rows loaded: {len(df)}")
-    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    tracking_uri = _resolve_mlflow_tracking_uri(project_root)
+    print(f"MLflow tracking URI: {tracking_uri}")
+    mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment("movie_recommender")
 
     embedding_cache = models_dir / "embeddings_all-mpnet-base-v2.npy"
