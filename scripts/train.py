@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
 import os
@@ -32,9 +33,24 @@ def _resolve_mlflow_tracking_uri(project_root: Path) -> str:
     return local_tracking_dir.resolve().as_uri()
 
 
+def _parse_args(project_root: Path) -> argparse.Namespace:
+    default_processed_path = project_root / "data" / "processed" / "movies_processed.csv"
+    parser = argparse.ArgumentParser(description="Train the movie recommender model.")
+    parser.add_argument(
+        "--processed-path",
+        type=Path,
+        default=default_processed_path,
+        help=f"Path to the processed movies CSV. Default: {default_processed_path}",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    processed_path = project_root / "data" / "processed" / "movies_processed.csv"
+    args = _parse_args(project_root)
+    processed_path = args.processed_path
+    if not processed_path.is_absolute():
+        processed_path = (project_root / processed_path).resolve()
     models_dir = project_root / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
