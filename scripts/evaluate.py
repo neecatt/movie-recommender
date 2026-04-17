@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -28,15 +29,32 @@ def _fresh_metrics() -> dict[str, float]:
     }
 
 
+def _parse_args(project_root: Path) -> argparse.Namespace:
+    default_processed_path = project_root / "data" / "processed" / "movies_processed.csv"
+    parser = argparse.ArgumentParser(description="Evaluate the movie recommender model.")
+    parser.add_argument(
+        "--processed-path",
+        type=Path,
+        default=default_processed_path,
+        help=f"Path to the processed movies CSV. Default: {default_processed_path}",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    processed_path = project_root / "data" / "processed" / "movies_processed.csv"
+    args = _parse_args(project_root)
+    processed_path = args.processed_path
+    if not processed_path.is_absolute():
+        processed_path = (project_root / processed_path).resolve()
     artifact_path = project_root / "models" / "hybrid_artifacts.joblib"
     reports_dir = project_root / "reports" / "results"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     if not artifact_path.exists():
         raise FileNotFoundError(f"Model artifact not found: {artifact_path}. Run scripts/train.py first.")
+    if not processed_path.exists():
+        raise FileNotFoundError(f"Processed dataset not found: {processed_path}")
 
     df = pd.read_csv(processed_path)
     artifacts = joblib.load(artifact_path)
