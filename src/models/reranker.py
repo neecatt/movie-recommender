@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
 
 from src.evaluation.pairwise import (
@@ -13,7 +14,7 @@ from src.evaluation.pairwise import (
     build_tmdb_recommendation_sets,
 )
 
-FEATURE_SCHEMA_VERSION = "couple_reranker_v2"
+FEATURE_SCHEMA_VERSION = "couple_reranker_v3"
 FEATURE_NAMES = (
     "sim_a",
     "sim_b",
@@ -21,6 +22,8 @@ FEATURE_NAMES = (
     "sim_mean",
     "sim_gap",
     "joint_score",
+    "utility_product",
+    "utility_harmonic",
     "genre_overlap_total",
     "genre_bridge",
     "genre_bridge_depth",
@@ -31,6 +34,31 @@ FEATURE_NAMES = (
     "recency_balance",
     "one_sided_penalty",
 )
+
+
+@dataclass
+class PairwiseLinearRanker:
+    """Linear scorer trained on pairwise feature differences."""
+
+    coef_: np.ndarray | None = None
+    intercept_: float = 0.0
+    n_features_in_: int = 0
+
+    def fit(self, X: list[list[float]], y: list[int]) -> "PairwiseLinearRanker":
+        clf = LogisticRegression(random_state=42, max_iter=2000)
+        clf.fit(X, y)
+        self.coef_ = clf.coef_[0].astype(np.float32, copy=False)
+        self.intercept_ = float(clf.intercept_[0])
+        self.n_features_in_ = int(clf.n_features_in_)
+        return self
+
+    def predict(self, X: list[list[float]] | np.ndarray) -> np.ndarray:
+        if self.coef_ is None:
+            raise RuntimeError("Call fit() before predict().")
+        arr = np.asarray(X, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return arr @ self.coef_ + self.intercept_
 
 
 def _split_items(value: object) -> set[str]:
@@ -96,6 +124,12 @@ def build_features(
     runtime_balance = _runtime_balance(base_rows, cand_row)
     quality_prior = _quality_prior(cand_row)
     recency_balance = _recency_balance(base_rows, cand_row)
+    utility_product = float(pair_stats["sim_a"] * pair_stats["sim_b"])
+    utility_harmonic = 0.0
+    if pair_stats["sim_a"] > 0 and pair_stats["sim_b"] > 0:
+        utility_harmonic = float(
+            2.0 * pair_stats["sim_a"] * pair_stats["sim_b"] / (pair_stats["sim_a"] + pair_stats["sim_b"] + 1e-9)
+        )
     one_sided_penalty = float(
         abs(pair_stats["sim_a"] - pair_stats["sim_b"])
         + max(per_seed_genre_overlap, default=0)
@@ -109,6 +143,8 @@ def build_features(
         pair_stats["sim_mean"],
         pair_stats["sim_gap"],
         pair_stats["joint_score"],
+        utility_product,
+        utility_harmonic,
         float(genre_overlap_total),
         genre_bridge,
         genre_bridge_depth,
@@ -126,11 +162,11 @@ def train_reranker(
     model,
     sample_size: int = 240,
     top_k: int = 120,
-) -> GradientBoostingRegressor:
+) -> PairwiseLinearRanker:
     pair_queries = build_pair_queries(df, sample_size=sample_size, random_state=42)
     recommendation_sets, id_to_index = build_tmdb_recommendation_sets(df)
     X: list[list[float]] = []
-    y: list[float] = []
+    y: list[int] = []
 
     for idx_a, idx_b in tqdm(pair_queries, desc="Reranker training", unit="pair"):
         base_a = df.loc[idx_a]
@@ -146,6 +182,7 @@ def train_reranker(
             top_pool=top_k,
             score_bundle=score_bundle,
         )
+        examples: list[tuple[list[float], float, dict[str, float]]] = []
         for i in candidates:
             cand = df.loc[i]
             pair_stats = model.pair_feature_stats(
@@ -160,7 +197,7 @@ def train_reranker(
             features = build_features([base_a, base_b], cand, pair_stats)
             relevance = gains.get(str(cand.get("movie_id", "")).strip(), 0.0)
             if relevance <= 0:
-                bridge_depth = features[8]
+                bridge_depth = features[10]
                 one_sided_penalty = features[-1]
                 if pair_stats["sim_min"] >= 0.18 and bridge_depth > 0:
                     relevance = 0.08 + 0.04 * pair_stats["sim_min"] + 0.03 * bridge_depth
@@ -168,12 +205,41 @@ def train_reranker(
                     relevance = -0.12 - 0.05 * min(pair_stats["sim_gap"], 1.0)
                 else:
                     relevance = 0.01 * pair_stats["sim_mean"]
-            X.append(features)
-            y.append(relevance)
+            examples.append((features, float(relevance), pair_stats))
+
+        if len(examples) < 2:
+            continue
+
+        positives = [
+            (features, relevance)
+            for features, relevance, pair_stats in examples
+            if relevance >= 0.45 and pair_stats["sim_min"] >= 0.16
+        ]
+        negatives = [
+            (features, relevance)
+            for features, relevance, pair_stats in examples
+            if relevance <= 0.05 or pair_stats["sim_gap"] >= 0.25
+        ]
+        if not positives or not negatives:
+            ranked = sorted(examples, key=lambda item: item[1], reverse=True)
+            cut = max(1, len(ranked) // 5)
+            positives = [(features, relevance) for features, relevance, _ in ranked[:cut]]
+            negatives = [(features, relevance) for features, relevance, _ in ranked[-cut:]]
+
+        pos_subset = positives[: min(6, len(positives))]
+        neg_subset = negatives[: min(6, len(negatives))]
+        for pos_features, _ in pos_subset:
+            for neg_features, _ in neg_subset:
+                diff = [p - n for p, n in zip(pos_features, neg_features)]
+                inv_diff = [-value for value in diff]
+                X.append(diff)
+                y.append(1)
+                X.append(inv_diff)
+                y.append(0)
 
     if not X:
         raise RuntimeError("No pairwise reranker examples were generated from TMDB recommendations.")
 
-    reranker = GradientBoostingRegressor(random_state=42)
+    reranker = PairwiseLinearRanker()
     reranker.fit(X, y)
     return reranker

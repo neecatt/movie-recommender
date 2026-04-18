@@ -159,12 +159,17 @@ def _candidate_indices(
     sim_b = _combine_components(pair_data["sim_b_components"], weights)
     joint = _combine_components(pair_data["joint_components"], weights)
     bridge = pair_data["bridge"]
+    sim_min = np.minimum(sim_a, sim_b)
+    sim_mean = (sim_a + sim_b) / 2.0
+    sim_gap = np.abs(sim_a - sim_b)
+    sim_product = np.sqrt(np.clip(sim_a, 0.0, None) * np.clip(sim_b, 0.0, None))
     pair_scores = (
-        0.35 * np.minimum(sim_a, sim_b)
-        + 0.20 * joint
-        + 0.15 * ((sim_a + sim_b) / 2.0)
-        + 0.30 * bridge
-        - 0.10 * np.abs(sim_a - sim_b)
+        0.42 * sim_min
+        + 0.18 * sim_product
+        + 0.12 * sim_mean
+        + 0.10 * joint
+        + 0.23 * bridge
+        - 0.22 * sim_gap
     )
 
     min_votes = int(weights["min_votes"])
@@ -193,44 +198,109 @@ def _candidate_indices(
     return pair_scores, ordered[:80], sim_a, sim_b, joint
 
 
+def _example_payload(pair_data: dict[str, Any], rec_ids: list[str], metrics: dict[str, float]) -> dict[str, Any]:
+    return {
+        "movie_id_a": pair_data["movie_id_a"],
+        "movie_id_b": pair_data["movie_id_b"],
+        "pair_type": pair_data["pair_type"],
+        "recommended_ids": rec_ids,
+        "relevant_ids": sorted(pair_data["relevant"])[:10],
+        "top1_hit": metrics["top1_hit"],
+        "ndcg_3": metrics["ndcg_3"],
+        "precision_3": metrics["precision_3"],
+        "recall_3": metrics["recall_3"],
+    }
+
+
+def _without_misery_thresholds(model: HybridRecommender, idx_a: int, idx_b: int) -> tuple[float, float]:
+    return model._without_misery_thresholds(idx_a, idx_b)
+
+
+def _passes_without_misery(
+    model: HybridRecommender,
+    pair_stats: dict[str, float],
+    base_rows: list[pd.Series],
+    cand_row: pd.Series,
+    min_similarity: float,
+    min_mean_similarity: float,
+) -> bool:
+    return model._passes_without_misery(
+        pair_stats,
+        base_rows,
+        cand_row,
+        min_similarity=min_similarity,
+        min_mean_similarity=min_mean_similarity,
+    )
+
+
 def _recommend_ids_for_pair(
     model: HybridRecommender,
     pair_data: dict[str, Any],
     weights: dict[str, float | int],
     votes: np.ndarray,
-) -> list[str]:
+) -> tuple[list[str], list[tuple[str, float]]]:
     if model._df is None:
         raise RuntimeError("Model artifacts are not loaded.")
 
     pair_scores, candidates, sim_a, sim_b, joint = _candidate_indices(pair_data, weights, votes)
     base_a = pair_data["base_a"]
     base_b = pair_data["base_b"]
+    min_similarity, min_mean_similarity = _without_misery_thresholds(model, pair_data["idx_a"], pair_data["idx_b"])
     reranked: list[tuple[int, float]] = []
+    fallback_reranked: list[tuple[int, float]] = []
 
     for idx in candidates:
         row = model._df.iloc[idx]
         pair_stats = _pair_feature_stats(sim_a, sim_b, joint, pair_scores, idx)
         rule_score = model._paired_overlap_bonus([base_a, base_b], row)
-        final_score = float(pair_stats["pair_score"]) + rule_score
+        misery_penalty = 0.0
+        if pair_stats["sim_min"] < min_similarity:
+            misery_penalty -= 0.35 * (min_similarity - pair_stats["sim_min"])
+        if pair_stats["sim_mean"] < min_mean_similarity:
+            misery_penalty -= 0.20 * (min_mean_similarity - pair_stats["sim_mean"])
+        if pair_stats["sim_gap"] > 0.20:
+            misery_penalty -= 0.12 * (pair_stats["sim_gap"] - 0.20)
+        final_score = float(pair_stats["pair_score"]) + rule_score + misery_penalty
         if model._reranker is not None:
             features = build_features([base_a, base_b], row, pair_stats)
             final_score += float(model._reranker.predict([features])[0])
-        reranked.append((idx, final_score))
+        entry = (idx, final_score)
+        fallback_reranked.append(entry)
+        if _passes_without_misery(
+            model,
+            pair_stats,
+            [base_a, base_b],
+            row,
+            min_similarity=min_similarity,
+            min_mean_similarity=min_mean_similarity,
+        ):
+            reranked.append(entry)
 
+    if not reranked:
+        reranked = fallback_reranked[:]
     reranked.sort(key=lambda item: item[1], reverse=True)
 
     genre_counts: dict[str, int] = {}
+    lean_counts = {-1: 0, 0: 0, 1: 0}
     final_ids: list[str] = []
+    final_scored: list[tuple[str, float]] = []
     for idx, score in reranked:
         row = model._df.iloc[idx]
         primary_genre = str(row.get("genre", "")).split(",")[0].strip()
-        adjusted_score = score - 0.05 * genre_counts.get(primary_genre, 0)
+        lean = model._lean_direction(float(sim_a[idx]), float(sim_b[idx]))
+        penalty = 0.05 * genre_counts.get(primary_genre, 0)
+        if final_ids:
+            penalty += 0.03 * lean_counts.get(lean, 0)
+        adjusted_score = score - penalty
         genre_counts[primary_genre] = genre_counts.get(primary_genre, 0) + 1
-        final_ids.append(str(row.get("movie_id", "")))
+        lean_counts[lean] = lean_counts.get(lean, 0) + 1
+        movie_id = str(row.get("movie_id", ""))
+        final_ids.append(movie_id)
+        final_scored.append((movie_id, float(adjusted_score)))
         if len(final_ids) >= 4:
             break
 
-    return final_ids
+    return final_ids, final_scored
 
 
 def _prepare_pairs(
@@ -276,13 +346,14 @@ def _evaluate_grid(
     model: HybridRecommender,
     prepared_pairs: list[dict[str, Any]],
     grid: list[dict[str, float | int]],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     if model._df is None:
         raise RuntimeError("Model artifacts are not loaded.")
 
     votes = model._df.get("votes", pd.Series(0, index=model._df.index)).fillna(0).to_numpy()
     results: list[dict[str, Any]] = []
     best: dict[str, Any] = {"ndcg_3": -1.0}
+    best_examples: dict[str, list[dict[str, Any]]] = {}
 
     for grid_index, weights in enumerate(grid, start=1):
         metrics = _fresh_metrics()
@@ -292,9 +363,10 @@ def _evaluate_grid(
             "far_apart": _fresh_metrics(),
         }
         slice_counts = {key: 0 for key in slice_metrics}
+        slice_examples = {key: [] for key in slice_metrics}
 
         for pair_data in prepared_pairs:
-            rec_ids = _recommend_ids_for_pair(model, pair_data, weights, votes)
+            rec_ids, _ = _recommend_ids_for_pair(model, pair_data, weights, votes)
             relevant = pair_data["relevant"]
             gains = pair_data["gains"]
             current = {
@@ -311,6 +383,7 @@ def _evaluate_grid(
             slice_counts[pair_type] += 1
             for key, value in current.items():
                 slice_metrics[pair_type][key] += value
+            slice_examples[pair_type].append(_example_payload(pair_data, rec_ids, current))
 
         for key in metrics:
             metrics[key] /= len(prepared_pairs)
@@ -329,13 +402,20 @@ def _evaluate_grid(
         results.append(result)
         if float(result["ndcg_3"]) > float(best.get("ndcg_3", -1.0)):
             best = result
+            best_examples = {}
+            for pair_type, examples in slice_examples.items():
+                ordered = sorted(examples, key=lambda item: item["ndcg_3"], reverse=True)
+                best_examples[pair_type] = {
+                    "best_examples": ordered[:3],
+                    "worst_examples": ordered[-3:],
+                }
         print(
             f"Grid {grid_index}/{len(grid)} | "
             f"ndcg@3={result['ndcg_3']:.4f} precision@3={result['precision_3']:.4f} "
             f"recall@3={result['recall_3']:.4f}"
         )
 
-    return best, results
+    return best, results, best_examples
 
 
 def main() -> None:
@@ -373,7 +453,7 @@ def main() -> None:
     print(f"Prepared to evaluate {len(pair_queries)} pair queries.")
     prepared_pairs = _prepare_pairs(model, df, pair_queries, recommendation_sets, id_to_index)
     grid = _build_grid()
-    best, all_results = _evaluate_grid(model, prepared_pairs, grid)
+    best, all_results, best_examples = _evaluate_grid(model, prepared_pairs, grid)
 
     best_output = {
         **best,
@@ -384,6 +464,7 @@ def main() -> None:
         "sample_size": len(prepared_pairs),
         "grid_size": len(grid),
         "runtime_sec": round(time.time() - start, 3),
+        "slice_examples": best_examples,
     }
     all_output = {
         "artifact_version": artifacts["artifact_version"],

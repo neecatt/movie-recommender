@@ -509,12 +509,17 @@ class HybridRecommender:
         sim_b = self._combined_scores([idx_b])
         joint = self._combined_scores([idx_a, idx_b])
         bridge = self._pair_bridge_scores(idx_a, idx_b)
+        sim_min = np.minimum(sim_a, sim_b)
+        sim_mean = (sim_a + sim_b) / 2.0
+        sim_gap = np.abs(sim_a - sim_b)
+        sim_product = np.sqrt(np.clip(sim_a, 0.0, None) * np.clip(sim_b, 0.0, None))
         pair_scores = (
-            0.35 * np.minimum(sim_a, sim_b)
-            + 0.20 * joint
-            + 0.15 * ((sim_a + sim_b) / 2.0)
-            + 0.30 * bridge
-            - 0.10 * np.abs(sim_a - sim_b)
+            0.42 * sim_min
+            + 0.18 * sim_product
+            + 0.12 * sim_mean
+            + 0.10 * joint
+            + 0.23 * bridge
+            - 0.22 * sim_gap
         )
         return {
             "sim_a": sim_a,
@@ -523,6 +528,49 @@ class HybridRecommender:
             "bridge": bridge,
             "pair_scores": pair_scores,
         }
+
+    def _without_misery_thresholds(self, idx_a: int, idx_b: int) -> tuple[float, float]:
+        if self._df is None:
+            raise RuntimeError("Call fit() before recommend().")
+        genres_a = self._split_items(self._df.iloc[idx_a].get("genre", ""))
+        genres_b = self._split_items(self._df.iloc[idx_b].get("genre", ""))
+        if genres_a & genres_b:
+            return 0.18, 0.12
+        return 0.14, 0.08
+
+    def _passes_without_misery(
+        self,
+        pair_stats: dict[str, float],
+        base_rows: list[pd.Series],
+        cand_row: pd.Series,
+        min_similarity: float,
+        min_mean_similarity: float,
+    ) -> bool:
+        if pair_stats["sim_min"] < min_similarity:
+            return False
+        if pair_stats["sim_mean"] < min_mean_similarity:
+            return False
+        if pair_stats["sim_gap"] > 0.34 and pair_stats["sim_min"] < min_similarity + 0.05:
+            return False
+        per_seed_overlap = [
+            len(self._split_items(base_row.get("genre", "")) & self._split_items(cand_row.get("genre", "")))
+            + len(self._split_items(base_row.get("keywords", "")) & self._split_items(cand_row.get("keywords", "")))
+            for base_row in base_rows
+        ]
+        if max(per_seed_overlap, default=0) <= 0:
+            return False
+        if min(per_seed_overlap, default=0) <= 0 and pair_stats["sim_min"] < min_similarity + 0.06:
+            return False
+        return True
+
+    @staticmethod
+    def _lean_direction(sim_a: float, sim_b: float, tolerance: float = 0.04) -> int:
+        gap = sim_a - sim_b
+        if gap > tolerance:
+            return 1
+        if gap < -tolerance:
+            return -1
+        return 0
 
     def two_seed_candidate_scores(
         self,
@@ -693,7 +741,9 @@ class HybridRecommender:
 
         base_a = self._df.iloc[idx_a]
         base_b = self._df.iloc[idx_b]
+        min_similarity, min_mean_similarity = self._without_misery_thresholds(idx_a, idx_b)
         reranked: list[tuple[int, float, dict[str, float]]] = []
+        fallback_reranked: list[tuple[int, float, dict[str, float]]] = []
         for i in candidates:
             row = self._df.iloc[i]
             pair_stats = self.pair_feature_stats(
@@ -706,28 +756,57 @@ class HybridRecommender:
                 joint_scores=score_bundle["joint"],
             )
             rule_score = self._paired_overlap_bonus([base_a, base_b], row)
-            final_score = float(pair_stats["pair_score"]) + rule_score
+            misery_penalty = 0.0
+            if pair_stats["sim_min"] < min_similarity:
+                misery_penalty -= 0.35 * (min_similarity - pair_stats["sim_min"])
+            if pair_stats["sim_mean"] < min_mean_similarity:
+                misery_penalty -= 0.20 * (min_mean_similarity - pair_stats["sim_mean"])
+            if pair_stats["sim_gap"] > 0.20:
+                misery_penalty -= 0.12 * (pair_stats["sim_gap"] - 0.20)
+            final_score = float(pair_stats["pair_score"]) + rule_score + misery_penalty
             if self._reranker is not None:
                 features = build_features([base_a, base_b], row, pair_stats)
                 final_score += float(self._reranker.predict([features])[0])
             debug_scores = {
                 **pair_stats,
                 "rule_score": rule_score,
+                "misery_penalty": misery_penalty,
                 "final_score": final_score,
             }
-            reranked.append((i, final_score, debug_scores))
+            entry = (i, final_score, debug_scores)
+            fallback_reranked.append(entry)
+            if self._passes_without_misery(
+                pair_stats,
+                [base_a, base_b],
+                row,
+                min_similarity=min_similarity,
+                min_mean_similarity=min_mean_similarity,
+            ):
+                reranked.append(entry)
 
+        if not reranked:
+            reranked = fallback_reranked[:]
         reranked = sorted(reranked, key=lambda item: item[1], reverse=True)
         genre_counts: dict[str, int] = {}
+        lean_counts = {-1: 0, 0: 0, 1: 0}
         final_indices: list[tuple[int, float, dict[str, float]]] = []
         for i, score, debug_scores in reranked:
             row = self._df.iloc[i]
             primary_genre = str(row.get("genre", "")).split(",")[0].strip()
             penalty = 0.05 * genre_counts.get(primary_genre, 0)
+            lean = self._lean_direction(debug_scores["sim_a"], debug_scores["sim_b"])
+            if final_indices:
+                penalty += 0.03 * lean_counts.get(lean, 0)
             adjusted_score = score - penalty
-            debug_scores = {**debug_scores, "diversity_penalty": penalty, "adjusted_score": adjusted_score}
+            debug_scores = {
+                **debug_scores,
+                "diversity_penalty": penalty,
+                "lean_direction": float(lean),
+                "adjusted_score": adjusted_score,
+            }
             final_indices.append((i, adjusted_score, debug_scores))
             genre_counts[primary_genre] = genre_counts.get(primary_genre, 0) + 1
+            lean_counts[lean] = lean_counts.get(lean, 0) + 1
             if len(final_indices) >= top_n:
                 break
 
