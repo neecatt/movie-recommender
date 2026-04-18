@@ -12,9 +12,10 @@ from src.evaluation.pairwise import (
     build_pair_queries,
     build_pair_relevance_gains,
     build_tmdb_recommendation_sets,
+    classify_pair,
 )
 
-FEATURE_SCHEMA_VERSION = "couple_reranker_v3"
+FEATURE_SCHEMA_VERSION = "couple_reranker_v4"
 FEATURE_NAMES = (
     "sim_a",
     "sim_b",
@@ -171,6 +172,7 @@ def train_reranker(
     for idx_a, idx_b in tqdm(pair_queries, desc="Reranker training", unit="pair"):
         base_a = df.loc[idx_a]
         base_b = df.loc[idx_b]
+        pair_type = classify_pair(df, idx_a, idx_b)
         gains = build_pair_relevance_gains(idx_a, idx_b, df, recommendation_sets, id_to_index)
         if not gains:
             continue
@@ -199,8 +201,10 @@ def train_reranker(
             if relevance <= 0:
                 bridge_depth = features[10]
                 one_sided_penalty = features[-1]
-                if pair_stats["sim_min"] >= 0.18 and bridge_depth > 0:
-                    relevance = 0.08 + 0.04 * pair_stats["sim_min"] + 0.03 * bridge_depth
+                if pair_stats["sim_min"] >= 0.12 and bridge_depth > 0:
+                    relevance = 0.10 + 0.05 * pair_stats["sim_min"] + 0.04 * bridge_depth
+                    if pair_type != "similar_taste":
+                        relevance += 0.05
                 elif pair_stats["sim_gap"] >= 0.28 or one_sided_penalty >= 1.5:
                     relevance = -0.12 - 0.05 * min(pair_stats["sim_gap"], 1.0)
                 else:
@@ -213,12 +217,12 @@ def train_reranker(
         positives = [
             (features, relevance)
             for features, relevance, pair_stats in examples
-            if relevance >= 0.45 and pair_stats["sim_min"] >= 0.16
+            if relevance >= 0.30 and pair_stats["sim_min"] >= 0.12
         ]
         negatives = [
             (features, relevance)
             for features, relevance, pair_stats in examples
-            if relevance <= 0.05 or pair_stats["sim_gap"] >= 0.25
+            if relevance <= 0.02 or pair_stats["sim_gap"] >= 0.32
         ]
         if not positives or not negatives:
             ranked = sorted(examples, key=lambda item: item[1], reverse=True)
@@ -226,7 +230,12 @@ def train_reranker(
             positives = [(features, relevance) for features, relevance, _ in ranked[:cut]]
             negatives = [(features, relevance) for features, relevance, _ in ranked[-cut:]]
 
-        pos_subset = positives[: min(6, len(positives))]
+        pair_multiplier = {
+            "similar_taste": 1,
+            "mixed_taste": 2,
+            "far_apart": 2,
+        }[pair_type]
+        pos_subset = positives[: min(6 * pair_multiplier, len(positives))]
         neg_subset = negatives[: min(6, len(negatives))]
         for pos_features, _ in pos_subset:
             for neg_features, _ in neg_subset:

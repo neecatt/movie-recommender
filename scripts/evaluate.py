@@ -33,6 +33,15 @@ def _fresh_metrics() -> dict[str, float]:
     }
 
 
+def _compromise_objective(result: dict[str, Any]) -> float:
+    pair_slices = result["pair_slices"]
+    return float(
+        0.20 * result["ndcg_3"]
+        + 0.45 * pair_slices["mixed_taste"]["ndcg_3"]
+        + 0.35 * pair_slices["far_apart"]["ndcg_3"]
+    )
+
+
 def _parse_args(project_root: Path) -> argparse.Namespace:
     default_processed_path = project_root / "data" / "processed" / "movies_processed.csv"
     parser = argparse.ArgumentParser(description="Evaluate the movie recommender model.")
@@ -164,12 +173,12 @@ def _candidate_indices(
     sim_gap = np.abs(sim_a - sim_b)
     sim_product = np.sqrt(np.clip(sim_a, 0.0, None) * np.clip(sim_b, 0.0, None))
     pair_scores = (
-        0.42 * sim_min
-        + 0.18 * sim_product
-        + 0.12 * sim_mean
-        + 0.10 * joint
-        + 0.23 * bridge
-        - 0.22 * sim_gap
+        0.34 * sim_min
+        + 0.16 * sim_product
+        + 0.16 * sim_mean
+        + 0.13 * joint
+        + 0.28 * bridge
+        - 0.14 * sim_gap
     )
 
     min_votes = int(weights["min_votes"])
@@ -255,11 +264,11 @@ def _recommend_ids_for_pair(
         rule_score = model._paired_overlap_bonus([base_a, base_b], row)
         misery_penalty = 0.0
         if pair_stats["sim_min"] < min_similarity:
-            misery_penalty -= 0.35 * (min_similarity - pair_stats["sim_min"])
+            misery_penalty -= 0.20 * (min_similarity - pair_stats["sim_min"])
         if pair_stats["sim_mean"] < min_mean_similarity:
-            misery_penalty -= 0.20 * (min_mean_similarity - pair_stats["sim_mean"])
-        if pair_stats["sim_gap"] > 0.20:
-            misery_penalty -= 0.12 * (pair_stats["sim_gap"] - 0.20)
+            misery_penalty -= 0.10 * (min_mean_similarity - pair_stats["sim_mean"])
+        if pair_stats["sim_gap"] > 0.28:
+            misery_penalty -= 0.06 * (pair_stats["sim_gap"] - 0.28)
         final_score = float(pair_stats["pair_score"]) + rule_score + misery_penalty
         if model._reranker is not None:
             features = build_features([base_a, base_b], row, pair_stats)
@@ -346,14 +355,16 @@ def _evaluate_grid(
     model: HybridRecommender,
     prepared_pairs: list[dict[str, Any]],
     grid: list[dict[str, float | int]],
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     if model._df is None:
         raise RuntimeError("Model artifacts are not loaded.")
 
     votes = model._df.get("votes", pd.Series(0, index=model._df.index)).fillna(0).to_numpy()
     results: list[dict[str, Any]] = []
     best: dict[str, Any] = {"ndcg_3": -1.0}
+    best_compromise: dict[str, Any] = {"compromise_objective": -1.0}
     best_examples: dict[str, list[dict[str, Any]]] = {}
+    best_compromise_examples: dict[str, list[dict[str, Any]]] = {}
 
     for grid_index, weights in enumerate(grid, start=1):
         metrics = _fresh_metrics()
@@ -397,8 +408,10 @@ def _evaluate_grid(
             **metrics,
             "pair_slices": slice_metrics,
             "pair_slice_counts": slice_counts,
+            "compromise_objective": 0.0,
             **weights,
         }
+        result["compromise_objective"] = _compromise_objective(result)
         results.append(result)
         if float(result["ndcg_3"]) > float(best.get("ndcg_3", -1.0)):
             best = result
@@ -409,13 +422,22 @@ def _evaluate_grid(
                     "best_examples": ordered[:3],
                     "worst_examples": ordered[-3:],
                 }
+        if float(result["compromise_objective"]) > float(best_compromise.get("compromise_objective", -1.0)):
+            best_compromise = result
+            best_compromise_examples = {}
+            for pair_type, examples in slice_examples.items():
+                ordered = sorted(examples, key=lambda item: item["ndcg_3"], reverse=True)
+                best_compromise_examples[pair_type] = {
+                    "best_examples": ordered[:3],
+                    "worst_examples": ordered[-3:],
+                }
         print(
             f"Grid {grid_index}/{len(grid)} | "
             f"ndcg@3={result['ndcg_3']:.4f} precision@3={result['precision_3']:.4f} "
-            f"recall@3={result['recall_3']:.4f}"
+            f"recall@3={result['recall_3']:.4f} compromise={result['compromise_objective']:.4f}"
         )
 
-    return best, results, best_examples
+    return best, best_compromise, results, best_examples, best_compromise_examples
 
 
 def main() -> None:
@@ -453,7 +475,9 @@ def main() -> None:
     print(f"Prepared to evaluate {len(pair_queries)} pair queries.")
     prepared_pairs = _prepare_pairs(model, df, pair_queries, recommendation_sets, id_to_index)
     grid = _build_grid()
-    best, all_results, best_examples = _evaluate_grid(model, prepared_pairs, grid)
+    best, best_compromise, all_results, best_examples, best_compromise_examples = _evaluate_grid(
+        model, prepared_pairs, grid
+    )
 
     best_output = {
         **best,
@@ -465,6 +489,17 @@ def main() -> None:
         "grid_size": len(grid),
         "runtime_sec": round(time.time() - start, 3),
         "slice_examples": best_examples,
+    }
+    compromise_output = {
+        **best_compromise,
+        "artifact_version": artifacts["artifact_version"],
+        "feature_schema_version": artifacts["feature_schema_version"],
+        "reranker_feature_count": artifacts["reranker_n_features"],
+        "processed_path": str(processed_path),
+        "sample_size": len(prepared_pairs),
+        "grid_size": len(grid),
+        "runtime_sec": round(time.time() - start, 3),
+        "slice_examples": best_compromise_examples,
     }
     all_output = {
         "artifact_version": artifacts["artifact_version"],
@@ -478,10 +513,13 @@ def main() -> None:
     }
 
     best_path = reports_dir / "offline_metrics.json"
+    compromise_path = reports_dir / "offline_metrics_compromise.json"
     grid_path = reports_dir / "offline_metrics_grid.json"
     best_path.write_text(json.dumps(best_output, indent=2))
+    compromise_path.write_text(json.dumps(compromise_output, indent=2))
     grid_path.write_text(json.dumps(all_output, indent=2))
     print(f"Saved best metrics to: {best_path}")
+    print(f"Saved compromise-weighted metrics to: {compromise_path}")
     print(f"Saved full grid metrics to: {grid_path}")
 
 
