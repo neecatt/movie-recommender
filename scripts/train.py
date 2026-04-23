@@ -35,12 +35,22 @@ def _resolve_mlflow_tracking_uri(project_root: Path) -> str:
 
 def _parse_args(project_root: Path) -> argparse.Namespace:
     default_processed_path = project_root / "data" / "processed" / "movies_processed.csv"
+    default_compromise_labels_path = project_root / "data" / "external" / "compromise_label_candidates.csv"
     parser = argparse.ArgumentParser(description="Train the movie recommender model.")
     parser.add_argument(
         "--processed-path",
         type=Path,
         default=default_processed_path,
         help=f"Path to the processed movies CSV. Default: {default_processed_path}",
+    )
+    parser.add_argument(
+        "--compromise-labels-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a manually labeled compromise CSV. "
+            f"Recommended location: {default_compromise_labels_path}"
+        ),
     )
     return parser.parse_args()
 
@@ -49,13 +59,18 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     args = _parse_args(project_root)
     processed_path = args.processed_path
+    compromise_labels_path = args.compromise_labels_path
     if not processed_path.is_absolute():
         processed_path = (project_root / processed_path).resolve()
+    if compromise_labels_path is not None and not compromise_labels_path.is_absolute():
+        compromise_labels_path = (project_root / compromise_labels_path).resolve()
     models_dir = project_root / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
     if not processed_path.exists():
         raise FileNotFoundError(f"Processed dataset not found: {processed_path}")
+    if compromise_labels_path is not None and not compromise_labels_path.exists():
+        raise FileNotFoundError(f"Compromise labels CSV not found: {compromise_labels_path}")
 
     print("Loading processed data...")
     df = pd.read_csv(processed_path)
@@ -90,6 +105,7 @@ def main() -> None:
                 "min_votes": model.min_votes,
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "reranker_feature_count": len(FEATURE_NAMES),
+                "uses_compromise_labels": compromise_labels_path is not None,
             }
         )
         print("Fitting hybrid model (this can take a few minutes)...")
@@ -101,7 +117,11 @@ def main() -> None:
         print("Training reranker...")
         rr_defaults = _func_defaults(train_reranker)
         rr_start = time.time()
-        reranker = train_reranker(df, model)
+        reranker = train_reranker(
+            df,
+            model,
+            compromise_labels_path=str(compromise_labels_path) if compromise_labels_path is not None else None,
+        )
         reranker_duration = time.time() - rr_start
         model.set_reranker(reranker)
         print("Reranker trained.")
@@ -127,6 +147,8 @@ def main() -> None:
             "reranker_top_k": rr_defaults.get("top_k"),
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "reranker_feature_count": len(FEATURE_NAMES),
+            "uses_compromise_labels": compromise_labels_path is not None,
+            "compromise_labels_path": str(compromise_labels_path) if compromise_labels_path is not None else None,
         }
         (reports_dir / "training_metrics.json").write_text(
             json.dumps(training_metrics, indent=2)
