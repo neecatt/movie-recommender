@@ -514,12 +514,12 @@ class HybridRecommender:
         sim_gap = np.abs(sim_a - sim_b)
         sim_product = np.sqrt(np.clip(sim_a, 0.0, None) * np.clip(sim_b, 0.0, None))
         pair_scores = (
-            0.34 * sim_min
-            + 0.16 * sim_product
-            + 0.16 * sim_mean
-            + 0.13 * joint
-            + 0.28 * bridge
-            - 0.14 * sim_gap
+            0.38 * sim_min
+            + 0.17 * sim_product
+            + 0.14 * sim_mean
+            + 0.115 * joint
+            + 0.255 * bridge
+            - 0.18 * sim_gap
         )
         return {
             "sim_a": sim_a,
@@ -535,8 +535,8 @@ class HybridRecommender:
         genres_a = self._split_items(self._df.iloc[idx_a].get("genre", ""))
         genres_b = self._split_items(self._df.iloc[idx_b].get("genre", ""))
         if genres_a & genres_b:
-            return 0.15, 0.10
-        return 0.10, 0.05
+            return 0.165, 0.11
+        return 0.12, 0.065
 
     def _passes_without_misery(
         self,
@@ -550,16 +550,16 @@ class HybridRecommender:
             return False
         if pair_stats["sim_mean"] < min_mean_similarity:
             return False
-        if pair_stats["sim_gap"] > 0.40 and pair_stats["sim_min"] < min_similarity + 0.03:
+        if pair_stats["sim_gap"] > 0.37 and pair_stats["sim_min"] < min_similarity + 0.04:
             return False
         per_seed_overlap = [
             len(self._split_items(base_row.get("genre", "")) & self._split_items(cand_row.get("genre", "")))
             + len(self._split_items(base_row.get("keywords", "")) & self._split_items(cand_row.get("keywords", "")))
             for base_row in base_rows
         ]
-        if max(per_seed_overlap, default=0) <= 0 and pair_stats["sim_min"] < min_similarity + 0.04:
+        if max(per_seed_overlap, default=0) <= 0 and pair_stats["sim_min"] < min_similarity + 0.045:
             return False
-        if min(per_seed_overlap, default=0) <= 0 and pair_stats["sim_mean"] < min_mean_similarity + 0.05:
+        if min(per_seed_overlap, default=0) <= 0 and pair_stats["sim_mean"] < min_mean_similarity + 0.055:
             return False
         return True
 
@@ -758,11 +758,11 @@ class HybridRecommender:
             rule_score = self._paired_overlap_bonus([base_a, base_b], row)
             misery_penalty = 0.0
             if pair_stats["sim_min"] < min_similarity:
-                misery_penalty -= 0.20 * (min_similarity - pair_stats["sim_min"])
+                misery_penalty -= 0.275 * (min_similarity - pair_stats["sim_min"])
             if pair_stats["sim_mean"] < min_mean_similarity:
-                misery_penalty -= 0.10 * (min_mean_similarity - pair_stats["sim_mean"])
-            if pair_stats["sim_gap"] > 0.28:
-                misery_penalty -= 0.06 * (pair_stats["sim_gap"] - 0.28)
+                misery_penalty -= 0.15 * (min_mean_similarity - pair_stats["sim_mean"])
+            if pair_stats["sim_gap"] > 0.24:
+                misery_penalty -= 0.09 * (pair_stats["sim_gap"] - 0.24)
             final_score = float(pair_stats["pair_score"]) + rule_score + misery_penalty
             if self._reranker is not None:
                 features = build_features([base_a, base_b], row, pair_stats)

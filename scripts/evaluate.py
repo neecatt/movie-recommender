@@ -36,9 +36,10 @@ def _fresh_metrics() -> dict[str, float]:
 def _compromise_objective(result: dict[str, Any]) -> float:
     pair_slices = result["pair_slices"]
     return float(
-        0.20 * result["ndcg_3"]
-        + 0.45 * pair_slices["mixed_taste"]["ndcg_3"]
-        + 0.35 * pair_slices["far_apart"]["ndcg_3"]
+        0.40 * result["ndcg_3"]
+        + 0.30 * pair_slices["mixed_taste"]["ndcg_3"]
+        + 0.20 * pair_slices["far_apart"]["ndcg_3"]
+        + 0.10 * pair_slices["similar_taste"]["ndcg_3"]
     )
 
 
